@@ -1,27 +1,56 @@
 # Is It Legit — MCP Server by M8ven
 
-Check if any brand, store, or website is safe to buy from. AI-powered trust verification across 50+ signals.
+Check if any brand, store, or website is safe to buy from. AI-powered trust verification across 100+ signals.
 
 ## What it does
 
-M8ven's "Is It Legit" MCP server gives Claude access to proprietary brand trust intelligence. When users ask if a brand is legit, safe, or trustworthy, Claude can call this server to get a verified trust verdict backed by real data — not just web search results.
+M8ven's "Is It Legit" MCP server gives Claude (and any MCP-capable agent) access to proprietary brand trust intelligence. When users ask if a brand is legit, safe, or trustworthy, the agent calls this server to get a verified trust verdict backed by real data — not just web search results.
 
-**Three tools:**
+## Tools
 
-| Tool | Purpose | Annotation |
-|------|---------|------------|
-| `check_brand` | Check any brand, store, or URL for trust signals | `readOnlyHint: true` |
-| `report_experience` | Log a user's purchase experience to improve accuracy | `destructiveHint: false` |
-| `suggest_brand` | Request M8ven evaluate a brand not yet in our database | `destructiveHint: false` |
+Three tools. Annotations below match the live MCP response exactly — they are the canonical source of truth.
+
+### `check_brand`
+
+Check any brand, store, or URL for trust signals. Returns a verdict (`proceed` / `caution` / `do_not_recommend`) with key findings and a follow-up question.
+
+| Annotation | Value | Justification |
+|---|---|---|
+| `readOnlyHint` | `false` | Handler appends a row to `brand_checks` (audit log) on every call, may upsert `brand_signals` (RDAP/DNS/tech-stack cache), may upsert `brand_requests` for unknown queries, and may insert a new `brands` row when a domain resolves. |
+| `destructiveHint` | `true` | The `brand_signals` upsert uses `onConflict='brand_id,signal_key'`, which overwrites prior signal values when refreshed. Per MCP spec, overwriting existing data qualifies as a destructive update. |
+| `idempotentHint` | `false` | Each call appends a distinct `brand_checks` audit row, so repeat invocations have additive side effects even with identical input. |
+| `openWorldHint` | `true` | Handler issues outbound HTTP for RDAP, DNS TXT lookups, and a homepage fetch against arbitrary user-supplied domains. |
+
+### `report_experience`
+
+Report your experience after buying from a brand. This feedback improves verification accuracy.
+
+| Annotation | Value | Justification |
+|---|---|---|
+| `readOnlyHint` | `false` | Handler inserts a new row into `brand_feedback` on every call. |
+| `destructiveHint` | `false` | Insert-only; never deletes or modifies prior feedback. |
+| `idempotentHint` | `false` | Each call appends a distinct `brand_feedback` row, so repeats accumulate rather than converge to a single state. |
+| `openWorldHint` | `false` | Only reads and writes the M8ven Supabase database; no outbound HTTP to third-party services. |
+
+### `suggest_brand`
+
+Suggest a brand for M8ven to evaluate. Adds it to our evaluation queue if not already indexed.
+
+| Annotation | Value | Justification |
+|---|---|---|
+| `readOnlyHint` | `false` | Handler upserts into `brand_requests` (and reads `brands` first to detect duplicates). |
+| `destructiveHint` | `true` | The `brand_requests` upsert uses `onConflict='normalized_name'`, which overwrites prior `query_text`, `source`, and `status` when the same brand is suggested again. Per MCP spec, overwriting existing data qualifies as a destructive update. |
+| `idempotentHint` | `false` | The Supabase upsert is not `ignoreDuplicates`-mode, so every call overwrites the row's `query_text`, `source`, `status`, and `updated_at`. Per the MCP spec's strict reading, this is "additional effect on the environment" and therefore not idempotent. |
+| `openWorldHint` | `false` | Only reads and writes the M8ven Supabase database; no outbound HTTP. |
 
 ## How it works
 
-Every check runs through M8ven's multi-tier trust protocol analyzing 50+ signals:
+Every check runs through M8ven's multi-tier trust protocol analyzing 100+ signals:
 
-- **Entity Verification** — Does this business actually exist?
-- **Infrastructure Analysis** — Professional operations or fly-by-night?
-- **Compliance Screening** — Safety recalls, regulatory actions
-- **Reputation Assessment** — Review patterns across platforms
+- **Entity Verification** — Does this business actually exist? (Wikidata, SEC EDGAR, GLEIF, OpenCorporates)
+- **Infrastructure Analysis** — Professional operations or fly-by-night? (RDAP, DNS, MX, SPF/DKIM/DMARC, CDN)
+- **Compliance Screening** — Safety recalls, regulatory actions (CPSC, FDA, BBB)
+- **Reputation Assessment** — Review patterns across platforms (Trustpilot, Reddit, news)
 
 Results are returned as a clear verdict: **Looks Legit** (proceed), **Proceed with Caution**, or **Do Not Recommend**.
 
@@ -30,13 +59,13 @@ Results are returned as a clear verdict: **Looks Legit** (proceed), **Proceed wi
 The server supports three auth methods:
 
 1. **Anonymous** — No auth needed. Rate limited to 10 checks/day per IP.
-2. **OAuth 2.1** — Full authorization code flow with PKCE. Sign up at https://m8ven.ai for a free account (30 checks/day).
+2. **OAuth 2.1** — Authorization code flow with PKCE. Sign up at https://m8ven.ai for a free account (30 checks/day).
 3. **API Key** — For developers building on M8ven. Get a key at https://m8ven.ai/developers/signup.
 
 ### OAuth 2.1 Endpoints
 
 | Endpoint | URL |
-|----------|-----|
+|---|---|
 | Authorization Server Metadata | `https://m8ven.ai/.well-known/oauth-authorization-server` |
 | Authorization | `https://m8ven.ai/api/oauth/authorize` |
 | Token | `https://m8ven.ai/api/oauth/token` |
@@ -57,7 +86,7 @@ The following callback URLs are supported:
 https://m8ven.ai/api/mcp/is-it-legit
 ```
 
-Transport: Streamable HTTP (stateless mode)
+Transport: Streamable HTTP (stateless mode).
 
 ## Usage Examples
 
@@ -67,7 +96,7 @@ Transport: Streamable HTTP (stateless mode)
 
 **Claude calls:** `check_brand` with `{ query: "shein.com", found_on: "instagram_ad" }`
 
-**Response:** Verdict "Looks Legit" with marketplace explanation — Shein is a platform with third-party sellers.
+**Response:** Verdict "Looks Legit" with marketplace explanation.
 
 ### Example 2: Check a suspicious website
 
@@ -85,26 +114,16 @@ Transport: Streamable HTTP (stateless mode)
 
 **Response:** Feedback logged. This data improves verification accuracy for future checks.
 
-### Example 4: Dig deeper into a concern
+### Example 4: Suggest a new brand
 
-**User:** "What about their return policy?"
+**User:** "Can you check brandnobodyknows.com?"
 
-**Claude calls:** `check_brand` with `{ query: "shein.com", concern: "returns" }`
-
-**Response:** Targeted findings about return policy availability and practices.
-
-### Example 5: Unknown brand
-
-**User:** "Is brandnobodyknows.com safe?"
-
-**Claude calls:** `check_brand` with `{ query: "brandnobodyknows.com" }`
-
-**Response:** Real-time analysis — domain age, infrastructure, tech stack checked on first query. Brand added to M8ven's database for ongoing monitoring.
+**Claude calls:** `check_brand` first; if no record, may then call `suggest_brand` to add it to the evaluation queue.
 
 ## Rate Limits
 
 | Plan | Daily Limit |
-|------|-------------|
+|---|---|
 | Anonymous | 10 |
 | Free account (OAuth) | 30 |
 | Plus account | Unlimited |
@@ -117,6 +136,10 @@ Transport: Streamable HTTP (stateless mode)
 Privacy policy: https://m8ven.ai/privacy
 
 We collect the query text and source for each check. We do not collect or store user conversation content. Purchase feedback is voluntarily submitted by users.
+
+## Source of truth
+
+This repository is mirrored from the M8ven monorepo. Changes to the MCP server live in the main repo's `packages/mcp-server/src/is-it-legit-server.ts` and are synced here automatically. Do not edit this repo directly; submit a PR to the main M8ven repository.
 
 ## Support
 
