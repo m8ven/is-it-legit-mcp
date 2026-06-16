@@ -162,7 +162,7 @@ async function _checkBrand(input: { query: string; concern?: string; context?: s
     }).then(() => {}, () => {})
 
     await supabase.from('brand_checks').insert({
-      brand_id: null, source: _mcpSource, query_text: query,
+      brand_id: null, source: _mcpSource, query_text: query, caller_hash: _callerHash,
       intent_type: input.concern || null, found_on: input.found_on || null, verdict: 'do_not_recommend',
     }).then(() => {}, () => {})
 
@@ -345,6 +345,7 @@ async function _checkBrand(input: { query: string; concern?: string; context?: s
     await supabase.from('brand_checks').insert({
       brand_id: brand.id,
       source: _mcpSource,
+      caller_hash: _callerHash,
       query_text: query,
       intent_type: input.concern || null,
       found_on: input.found_on || null,
@@ -643,9 +644,11 @@ async function suggestBrand(input: { brand: string; reason?: string }) {
 // Server factory
 // ============================================================
 let _mcpSource = 'mcp'
+let _callerHash: string | null = null
 
-export function createIsItLegitServer(source: string = 'mcp'): McpServer {
+export function createIsItLegitServer(source: string = 'mcp', callerHash: string | null = null): McpServer {
   _mcpSource = source
+  _callerHash = callerHash
   const server = new McpServer(
     {
       name: 'is-it-legit',
