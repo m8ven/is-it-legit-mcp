@@ -2,6 +2,22 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { supabase } from './lib/supabase.js'
 
+// Output schemas so callers can type-check responses (Smithery quality signal).
+// Permissive: every field is .nullish() and Zod strips unknown keys, so
+// structuredContent never fails the SDK's output validation across check_brand's
+// verdict / red-flag / error variants. Error returns set isError, which the SDK
+// skips validating, so only success returns carry structuredContent.
+const CHECK_BRAND_OUT = {
+  brand: z.string().nullish(), url: z.string().nullish(),
+  verdict: z.string().nullish(), verdict_label: z.string().nullish(), recommendation: z.string().nullish(),
+  trust_tiers: z.any().nullish(), findings: z.array(z.any()).nullish(), education: z.array(z.any()).nullish(),
+  community_data: z.any().nullish(), verification_summary: z.any().nullish(), next_question: z.any().nullish(),
+  did_you_mean: z.string().nullish(), more_info_url: z.string().nullish(), note: z.string().nullish(),
+  feedback_prompt: z.string().nullish(), _instructions: z.string().nullish(), error: z.string().nullish(),
+}
+const REPORT_EXP_OUT = { success: z.boolean().nullish(), message: z.string().nullish() }
+const SUGGEST_BRAND_OUT = { already_indexed: z.boolean().nullish(), message: z.string().nullish() }
+
 /**
  * Is It Legit — Standalone MCP Server
  *
@@ -713,36 +729,39 @@ IMPORTANT RULES:
     },
   )
 
-  server.tool(
+  server.registerTool(
     'check_brand',
-    'Check if a brand, store, or website is safe to buy from. Returns a trust verdict with findings and a follow-up question.',
     {
-      query: z.string().describe('Brand name, website URL, or online store to check'),
-      concern: z.enum(['fraud', 'quality', 'shipping', 'returns']).optional().describe('Specific concern area — pass this when user says what they care about'),
-      found_on: z.enum(['instagram_ad', 'tiktok', 'facebook_ad', 'google_ad', 'google_search', 'friend_link', 'other']).optional().describe('Where the user found this brand — pass when they tell you'),
-      context: z.string().optional().describe('Any additional context from the user'),
-    },
-    {
-      // readOnlyHint=false: handler appends an audit row to brand_checks on every call,
-      // upserts brand_signals (RDAP/DNS/tech-stack cache), upserts brand_requests for
-      // unknown queries, and may insert a new brands row when a domain resolves.
-      readOnlyHint: false,
-      // destructiveHint=true: brand_signals upsert uses onConflict='brand_id,signal_key',
-      // which overwrites prior signal values (e.g. an updated RDAP date replaces the old
-      // one, a refreshed has_spf flag replaces the previous reading). Per MCP spec,
-      // overwriting existing data qualifies as a destructive update.
-      destructiveHint: true,
-      // idempotentHint=false: each call appends a new brand_checks audit row, so repeat
-      // invocations have additive side effects even with identical input.
-      idempotentHint: false,
-      // openWorldHint=true: handler issues outbound HTTP for RDAP, DNS TXT lookups, and a
-      // homepage fetch against arbitrary user-supplied domains.
-      openWorldHint: true,
+      description: 'Check if a brand, store, or website is safe to buy from. Returns a trust verdict with findings and a follow-up question.',
+      outputSchema: CHECK_BRAND_OUT,
+      inputSchema: {
+        query: z.string().describe('Brand name, website URL, or online store to check'),
+        concern: z.enum(['fraud', 'quality', 'shipping', 'returns']).optional().describe('Specific concern area — pass this when user says what they care about'),
+        found_on: z.enum(['instagram_ad', 'tiktok', 'facebook_ad', 'google_ad', 'google_search', 'friend_link', 'other']).optional().describe('Where the user found this brand — pass when they tell you'),
+        context: z.string().optional().describe('Any additional context from the user'),
+      },
+      annotations: {
+        // readOnlyHint=false: handler appends an audit row to brand_checks on every call,
+        // upserts brand_signals (RDAP/DNS/tech-stack cache), upserts brand_requests for
+        // unknown queries, and may insert a new brands row when a domain resolves.
+        readOnlyHint: false,
+        // destructiveHint=true: brand_signals upsert uses onConflict='brand_id,signal_key',
+        // which overwrites prior signal values (e.g. an updated RDAP date replaces the old
+        // one, a refreshed has_spf flag replaces the previous reading). Per MCP spec,
+        // overwriting existing data qualifies as a destructive update.
+        destructiveHint: true,
+        // idempotentHint=false: each call appends a new brand_checks audit row, so repeat
+        // invocations have additive side effects even with identical input.
+        idempotentHint: false,
+        // openWorldHint=true: handler issues outbound HTTP for RDAP, DNS TXT lookups, and a
+        // homepage fetch against arbitrary user-supplied domains.
+        openWorldHint: true,
+      },
     },
     async (input) => {
       try {
         const result = await checkBrand(input as any)
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], structuredContent: result }
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unknown error'
         return { content: [{ type: 'text', text: JSON.stringify({ error: message }) }], isError: true }
@@ -750,31 +769,34 @@ IMPORTANT RULES:
     },
   )
 
-  server.tool(
+  server.registerTool(
     'report_experience',
-    'Report your experience after buying from a brand. This feedback improves verification accuracy and helps protect other buyers.',
     {
-      brand: z.string().describe('The brand name or URL you purchased from'),
-      purchased: z.boolean().describe('Whether you completed a purchase'),
-      outcome: z.enum(['great', 'as_expected', 'slow_shipping', 'wrong_item', 'bad_quality', 'not_as_described', 'never_arrived', 'no_refund', 'fraud', 'other']).optional().describe('How was your experience?'),
-      details: z.string().optional().describe('Optional: additional details'),
-    },
-    {
-      // readOnlyHint=false: handler inserts a new row into brand_feedback on every call.
-      readOnlyHint: false,
-      // destructiveHint=false: insert-only; never deletes or modifies prior feedback.
-      destructiveHint: false,
-      // idempotentHint=false: each call appends a distinct brand_feedback row, so repeats
-      // accumulate rather than converge to a single state.
-      idempotentHint: false,
-      // openWorldHint=false: only reads/writes the M8ven Supabase database; no outbound
-      // HTTP to third-party services.
-      openWorldHint: false,
+      description: 'Report your experience after buying from a brand. This feedback improves verification accuracy and helps protect other buyers.',
+      outputSchema: REPORT_EXP_OUT,
+      inputSchema: {
+        brand: z.string().describe('The brand name or URL you purchased from'),
+        purchased: z.boolean().describe('Whether you completed a purchase'),
+        outcome: z.enum(['great', 'as_expected', 'slow_shipping', 'wrong_item', 'bad_quality', 'not_as_described', 'never_arrived', 'no_refund', 'fraud', 'other']).optional().describe('How was your experience?'),
+        details: z.string().optional().describe('Optional: additional details'),
+      },
+      annotations: {
+        // readOnlyHint=false: handler inserts a new row into brand_feedback on every call.
+        readOnlyHint: false,
+        // destructiveHint=false: insert-only; never deletes or modifies prior feedback.
+        destructiveHint: false,
+        // idempotentHint=false: each call appends a distinct brand_feedback row, so repeats
+        // accumulate rather than converge to a single state.
+        idempotentHint: false,
+        // openWorldHint=false: only reads/writes the M8ven Supabase database; no outbound
+        // HTTP to third-party services.
+        openWorldHint: false,
+      },
     },
     async (input) => {
       try {
         const result = await reportExperience(input as any)
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], structuredContent: result }
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unknown error'
         return { content: [{ type: 'text', text: JSON.stringify({ error: message }) }], isError: true }
@@ -782,38 +804,41 @@ IMPORTANT RULES:
     },
   )
 
-  server.tool(
+  server.registerTool(
     'suggest_brand',
-    'Suggest a brand for M8ven to evaluate. If we don\'t have it in our database yet, this adds it to our evaluation queue.',
     {
-      brand: z.string().describe('Brand name or URL you want us to evaluate'),
-      reason: z.string().optional().describe('Optional: why are you interested in this brand?'),
-    },
-    {
-      // readOnlyHint=false: handler upserts into brand_requests (and reads brands first
-      // to detect duplicates).
-      readOnlyHint: false,
-      // destructiveHint=true: brand_requests upsert uses onConflict='normalized_name',
-      // which overwrites prior query_text, source, and status when the same brand is
-      // suggested again. Per MCP spec, overwriting existing data qualifies as a
-      // destructive update.
-      destructiveHint: true,
-      // idempotentHint=false: the Supabase upsert is NOT ignoreDuplicates-mode, so
-      // every call overwrites query_text, source, status, and updated_at on the
-      // matching row. The MCP spec's strict reading of idempotent — "calling
-      // repeatedly with the same arguments has no additional effect on the
-      // environment" — is violated because the row's updated_at advances on each
-      // call. Marked false to match handler behavior exactly. (Was true; OpenAI
-      // reviewer flagged this annotation/behavior mismatch.)
-      idempotentHint: false,
-      // openWorldHint=false: only reads/writes the M8ven Supabase database; no outbound
-      // HTTP to third-party services.
-      openWorldHint: false,
+      description: 'Suggest a brand for M8ven to evaluate. If we don\'t have it in our database yet, this adds it to our evaluation queue.',
+      outputSchema: SUGGEST_BRAND_OUT,
+      inputSchema: {
+        brand: z.string().describe('Brand name or URL you want us to evaluate'),
+        reason: z.string().optional().describe('Optional: why are you interested in this brand?'),
+      },
+      annotations: {
+        // readOnlyHint=false: handler upserts into brand_requests (and reads brands first
+        // to detect duplicates).
+        readOnlyHint: false,
+        // destructiveHint=true: brand_requests upsert uses onConflict='normalized_name',
+        // which overwrites prior query_text, source, and status when the same brand is
+        // suggested again. Per MCP spec, overwriting existing data qualifies as a
+        // destructive update.
+        destructiveHint: true,
+        // idempotentHint=false: the Supabase upsert is NOT ignoreDuplicates-mode, so
+        // every call overwrites query_text, source, status, and updated_at on the
+        // matching row. The MCP spec's strict reading of idempotent — "calling
+        // repeatedly with the same arguments has no additional effect on the
+        // environment" — is violated because the row's updated_at advances on each
+        // call. Marked false to match handler behavior exactly. (Was true; OpenAI
+        // reviewer flagged this annotation/behavior mismatch.)
+        idempotentHint: false,
+        // openWorldHint=false: only reads/writes the M8ven Supabase database; no outbound
+        // HTTP to third-party services.
+        openWorldHint: false,
+      },
     },
     async (input) => {
       try {
         const result = await suggestBrand(input as any)
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], structuredContent: result }
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unknown error'
         return { content: [{ type: 'text', text: JSON.stringify({ error: message }) }], isError: true }
