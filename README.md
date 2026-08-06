@@ -1,6 +1,6 @@
 # Is It Legit — MCP Server by M8ven
 
-[![M8ven Verified](https://m8ven.ai/badge/mcp/jj-m8ven-is-it-legit-mcp-b20672)](https://m8ven.ai/mcp/jj-m8ven-is-it-legit-mcp-b20672)
+[![M8ven Verified](https://m8ven.ai/badge/mcp/is-it-legit-mcp)](https://m8ven.ai/mcp/is-it-legit-mcp)
 
 Check if any brand, store, or website is safe to buy from. AI-powered trust verification across 100+ signals.
 
