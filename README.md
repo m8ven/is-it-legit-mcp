@@ -1,6 +1,10 @@
 # Is It Legit — MCP Server by M8ven
 
+[![M8ven Verified](https://m8ven.ai/badge/mcp/jj-m8ven-is-it-legit-mcp-b20672)](https://m8ven.ai/mcp/jj-m8ven-is-it-legit-mcp-b20672)
+
 Check if any brand, store, or website is safe to buy from. AI-powered trust verification across 100+ signals.
+
+> **Ship an MCP server?** M8ven gives it a free, independent trust score across 40+ code and supply-chain checks — and a live badge like the one above. [Check yours in 30 seconds →](https://m8ven.ai/verified)
 
 ## What it does
 
